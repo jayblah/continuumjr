@@ -123,11 +123,8 @@ public class ViewRedditGalleryActivity extends AppCompatActivity
     private boolean showingList = false;
     // Whether the list may animate its GIFs, under the app's Video Autoplay settings.
     private boolean autoplayGifs;
-    /** Plays the mp4 of the one gif the vertical list is resting on. */
-    @Nullable
-    private ExoPlayer gifPlayer;
-    @Nullable
-    private GalleryListViewHolder gifVideoHolder;
+    /** Plays the mp4 of each gif the vertical list is resting on (a few at most). */
+    private final java.util.Set<GalleryListViewHolder> gifVideoHolders = new java.util.LinkedHashSet<>();
     // Enabled while the pager is open over the list, so back returns to the list instead of leaving.
     private final OnBackPressedCallback backToList = new OnBackPressedCallback(false) {
         @Override
@@ -326,7 +323,7 @@ public class ViewRedditGalleryActivity extends AppCompatActivity
         @Override
         public void onViewRecycled(@NonNull GalleryListViewHolder holder) {
             if (holder.videoPlaying) {
-                stopGifVideo();
+                stopGifVideo(holder);
             }
             holder.animated = false;
             Glide.with(ViewRedditGalleryActivity.this).clear(holder.binding.imageViewItemShadowboxGallery);
@@ -337,7 +334,7 @@ public class ViewRedditGalleryActivity extends AppCompatActivity
             // Off the screen, a row gives its animation back: the decoded frames of a long GIF are
             // what the list ran out of memory and time on when every row it had passed kept its own.
             if (holder.videoPlaying) {
-                stopGifVideo();
+                stopGifVideo(holder);
             }
             holder.stopAnimation();
         }
@@ -351,6 +348,8 @@ public class ViewRedditGalleryActivity extends AppCompatActivity
         boolean animated;
         /** This row is the one the gif player is showing. */
         boolean videoPlaying;
+        @Nullable
+        ExoPlayer videoPlayer;
 
         GalleryListViewHolder(ItemShadowboxGalleryBinding binding) {
             super(binding.getRoot());
@@ -443,10 +442,12 @@ public class ViewRedditGalleryActivity extends AppCompatActivity
         sizedRequest(item.url).thumbnail(sizedRequest(still)).into(holder.binding.imageViewItemShadowboxGallery);
     }
 
+    private static final int MAX_PLAYING_GIFS = 4;
+
     private void animateRestingGifs() {
         RecyclerView list = binding.recyclerViewViewRedditGalleryActivity;
-        GalleryListViewHolder best = null;
-        int bestVisible = 0;
+        java.util.List<GalleryListViewHolder> wanted = new ArrayList<>();
+        java.util.List<Integer> visibleHeights = new ArrayList<>();
         for (int i = 0; i < list.getChildCount(); i++) {
             View child = list.getChildAt(i);
             RecyclerView.ViewHolder holder = list.getChildViewHolder(child);
@@ -456,20 +457,29 @@ public class ViewRedditGalleryActivity extends AppCompatActivity
             GalleryListViewHolder row = (GalleryListViewHolder) holder;
             animateGifIfResting(row);
             Post.Gallery item = row.item;
-            if (item != null && autoplayGifs && item.mediaType == Post.Gallery.TYPE_GIF && item.mp4Url != null) {
-                int visible = Math.min(child.getBottom(), list.getHeight()) - Math.max(child.getTop(), 0);
-                if (visible > bestVisible) {
-                    bestVisible = visible;
-                    best = row;
-                }
+            int visible = Math.min(child.getBottom(), list.getHeight()) - Math.max(child.getTop(), 0);
+            if (item != null && autoplayGifs && item.mediaType == Post.Gallery.TYPE_GIF
+                    && item.mp4Url != null && visible > 0) {
+                wanted.add(row);
+                visibleHeights.add(visible);
             }
         }
-        // One gif plays at a time -- the row showing most of itself -- as a video, which the
-        // device's decoder handles where the same animation as a GIF is decoded by the CPU.
-        if (best == null) {
-            stopGifVideo();
-        } else if (!best.videoPlaying) {
-            startGifVideo(best);
+        // Every gif on screen plays, as a video the device's decoder handles where the same
+        // animation as a GIF is decoded by the CPU. The most visible few if there are many.
+        while (wanted.size() > MAX_PLAYING_GIFS) {
+            int least = visibleHeights.indexOf(java.util.Collections.min(visibleHeights));
+            wanted.remove(least);
+            visibleHeights.remove(least);
+        }
+        for (GalleryListViewHolder playing : new ArrayList<>(gifVideoHolders)) {
+            if (!wanted.contains(playing)) {
+                stopGifVideo(playing);
+            }
+        }
+        for (GalleryListViewHolder row : wanted) {
+            if (!row.videoPlaying) {
+                startGifVideo(row);
+            }
         }
     }
 
@@ -478,38 +488,39 @@ public class ViewRedditGalleryActivity extends AppCompatActivity
         if (item == null || item.mp4Url == null) {
             return;
         }
-        stopGifVideo();
-        if (gifPlayer == null) {
-            gifPlayer = new ExoPlayer.Builder(this).build();
-            gifPlayer.setVolume(0f);
-            gifPlayer.setRepeatMode(Player.REPEAT_MODE_ALL);
-        }
-        holder.binding.playerViewItemShadowboxGallery.setPlayer(gifPlayer);
+        ExoPlayer player = new ExoPlayer.Builder(this).build();
+        player.setVolume(0f);
+        player.setRepeatMode(Player.REPEAT_MODE_ALL);
+        holder.binding.playerViewItemShadowboxGallery.setPlayer(player);
         holder.binding.playerViewItemShadowboxGallery.setVisibility(View.VISIBLE);
         holder.videoPlaying = true;
-        gifVideoHolder = holder;
-        gifPlayer.setMediaItem(MediaItem.fromUri(item.mp4Url));
-        gifPlayer.setPlayWhenReady(true);
-        gifPlayer.prepare();
+        holder.videoPlayer = player;
+        gifVideoHolders.add(holder);
+        player.setMediaItem(MediaItem.fromUri(item.mp4Url));
+        player.setPlayWhenReady(true);
+        player.prepare();
     }
 
-    private void stopGifVideo() {
-        GalleryListViewHolder holder = gifVideoHolder;
-        gifVideoHolder = null;
-        if (holder != null) {
-            holder.videoPlaying = false;
-            holder.binding.playerViewItemShadowboxGallery.setPlayer(null);
-            holder.binding.playerViewItemShadowboxGallery.setVisibility(View.GONE);
+    private void stopGifVideo(GalleryListViewHolder holder) {
+        gifVideoHolders.remove(holder);
+        holder.videoPlaying = false;
+        holder.binding.playerViewItemShadowboxGallery.setPlayer(null);
+        holder.binding.playerViewItemShadowboxGallery.setVisibility(View.GONE);
+        if (holder.videoPlayer != null) {
+            holder.videoPlayer.release();
+            holder.videoPlayer = null;
         }
-        if (gifPlayer != null) {
-            gifPlayer.stop();
-            gifPlayer.clearMediaItems();
+    }
+
+    private void stopAllGifVideos() {
+        for (GalleryListViewHolder holder : new ArrayList<>(gifVideoHolders)) {
+            stopGifVideo(holder);
         }
     }
 
     @Override
     protected void onPause() {
-        stopGifVideo();
+        stopAllGifVideos();
         super.onPause();
     }
 
@@ -523,10 +534,7 @@ public class ViewRedditGalleryActivity extends AppCompatActivity
 
     @Override
     protected void onDestroy() {
-        if (gifPlayer != null) {
-            gifPlayer.release();
-            gifPlayer = null;
-        }
+        stopAllGifVideos();
         super.onDestroy();
     }
 
@@ -593,7 +601,7 @@ public class ViewRedditGalleryActivity extends AppCompatActivity
     private void showPager(int index) {
         showingList = false;
         backToList.setEnabled(true);
-        stopGifVideo();
+        stopAllGifVideos();
         binding.recyclerViewViewRedditGalleryActivity.setVisibility(View.GONE);
         binding.viewPagerViewRedditGalleryActivity.setVisibility(View.VISIBLE);
         createPagerAdapter();

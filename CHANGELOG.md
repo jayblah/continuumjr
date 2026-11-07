@@ -2,6 +2,13 @@
 
 ---
 
+8.3.3.9.1.27-beta.6 / 2026-11-6
+============
+**Fixed**
+* Vertical gallery list: every GIF on screen now animates, not just the one showing most of itself (up to four at a time, the most visible first)
+
+---
+
 8.3.3.9.1.27-beta.5 / 2026-11-6
 ============
 **New**
